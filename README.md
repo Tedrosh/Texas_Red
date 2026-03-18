@@ -9,7 +9,13 @@ These are the files for the source code behind _Texas Red_ (Outlaw)
 - this runs the sin drive for scheduling a 2-phase stepper motor and interfacing with the leader
 
 **follower_test** - for communication testing (high vs low)
+
+
 **follower_test_edge_detection** - for communication testing (handles rising edge interrupt)
+
+
 **leader_test** - sends high/low signal
+
+
 **leader_test_edge_detection** - sends pulse
 
