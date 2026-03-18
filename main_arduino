@@ -1,0 +1,1196 @@
+// TR-210 Weapons System Operation Code
+
+
+//  ________________
+// | O     O      O |
+// | FL    FM    FR |
+// |                |
+// |     o o o      |
+// |     L M R      |
+// |                |
+// |________________|
+
+
+// ACTIONS
+// NOTHING
+// MOVE_FORWARD
+// TURN_LEFT
+// TURN_RIGHT
+// MOVE_BACKWARD
+
+
+// Start 2 minute timer (requires parallel timers can do this later as a software add-on)
+// enable line following (enables corrections from line following)
+// turn stepper to pos x
+
+// start flywheel motors
+// stop flywheel motors
+
+
+
+// STATES
+
+// Phase A: 
+//  ----------
+//   stepper to position 0
+//   start 2 minutes timer
+//   start flywheel motors
+
+// ORIENTING Orienting until beacon on left
+
+// Phase B: 
+// SEARCHING_FOR_LINE_FORWARD
+// ROTATE LEFT
+// ROTATE RIGHT
+// FORWARD ONTO LINE
+// ALIGNING
+// LINE FOLLOWING
+
+// Phase C: Puck Launching
+//.   -----------
+// FIRING FIRST
+//   spin up timer expires
+//.  -----------
+//.  step to position 1
+//   restart spin up timer
+
+// FIRING SECOND
+//   spin up timer expires
+//.  -----------
+//.  step to position 2
+//   restart spin up timer
+
+// FIRING THIRD
+//   spin up timer expires
+//.  -----------
+//.  step to position 3
+//   restart spin up timer
+
+// DONE
+
+// EVENTS
+// Left IR reads highest
+
+// FL Refl sens W -> B
+// FL Refl Sens B -> W
+// FR Refl Sens B -> W
+// FR refl sens W -> B
+// M Refl sens W -> B
+// FM refl sens W -> B
+// FL ref sens W -> B
+// FR ref sens W -> B
+// NEED ONE FOR EACH
+
+// timers......
+// - game clock timer expires
+// - reload timer expires
+
+
+
+// END OF NOTES
+
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+// DEBUG
+// ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+int DEBUG_pins_used = 0;
+
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+// FUNCTION PROTOTYPES
+// ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+
+void handleMoveForward(void);
+void handleMoveBackward(void);
+void handleTurnLeft(void);
+void handleTurnRight(void);
+void handleActionOff(void);
+
+void updateLineSensors(void);
+bool read_line_sensor(int pin);
+
+void turnFlywheelsOn(void);
+void turnFlywheelsOff(void);
+
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+// STEUP FUNCTIONS
+// ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+
+// STATE MACHINE setup
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+typedef enum {
+  // Phase A: aligning to map
+  STATE_A1_ORIENTING,
+  // Phase B: moving into position
+  STATE_B0_move_forward,
+  STATE_B1_SEARCHING_FOR_LINE,
+  STATE_B2a_ROTATE_LEFT,
+  STATE_B2b_ROTATE_RIGHT,
+  STATE_B3_FORWARD_ONTO_LINE,
+  STATE_B4_ALIGNING,
+  STATE_B5_LINE_FOLLOWING,
+  // IF WE ARE GETTING TO THE LINE AND NOT ALIGNED, CAN IMPLEMENT B6a B6b aligning strategy again
+  // Phase C: firing
+  STATE_C1_FIRING_FIRST,
+  STATE_C2_FIRING_SECOND,
+  STATE_C3_FIRING_THIRD,
+  STATE_D1_RETURN_FOR_RELOAD,
+  STATE_D2_HOLD_FOR_RELOAD,
+  
+  // idle state at end
+  STATE_DONE,
+  TEST_DISTANCE_SENSORS,
+  DUMMY_STATE
+} States_t;
+States_t state = DUMMY_STATE;
+
+
+void setup_state_machine(void) {
+  return;
+}
+
+
+// TIMER setup
+// ———————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+#include <Metro.h>
+#define RELOAD_TIMER_INTERVAL    7000
+static Metro reload_timer = Metro(RELOAD_TIMER_INTERVAL);
+
+/*
+// Select the timers you're using, here ITimer1
+#define USE_TIMER_1     true
+#define USE_TIMER_2     false
+#define USE_TIMER_3     false
+#define USE_TIMER_4     false
+#define USE_TIMER_5     false
+
+#include "TimerInterrupt.h"
+#include "ISR_Timer.h"
+
+// two minute game clock
+#define TIMER_INTERVAL_MS  2*60*1000
+
+void setup_timer(void) {
+  // Init timer ITimer1
+  ITimer1.init();
+
+  // Interval in unsigned long millisecs
+  if (ITimer1.attachInterruptInterval(TIMER_INTERVAL_MS, GameClock_Timer_Handler))
+    Serial.println("Starting  ITimer OK, millis() = " + String(millis()));
+  else
+    Serial.println("Can't set ITimer for Game Clock. Select another freq. or timer");
+  return;
+}
+*/
+
+// DRIVING setup
+// ———————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+// H_BRIDGE PINS
+#define DRIVING_pin_ENA 3 // PWM
+#define DRIVING_pin_IN1 7
+#define DRIVING_pin_IN2 6 // Swapped to fix polarity
+#define DRIVING_pin_IN3 8
+#define DRIVING_pin_IN4 9
+#define DRIVING_pin_ENB 5 // PWM
+// TOTAL PINS 6
+
+// WHEEL ACTIONS
+// one of these is always selected
+typedef enum {
+  ACTION_MOVE_FORWARD,
+  ACTION_MOVE_BACKWARD,
+  ACTION_TURN_LEFT,
+  ACTION_TURN_RIGHT,
+  ACTION_OFF,
+  ACTION_DUMMY
+} Actions_t;
+Actions_t action = ACTION_OFF;
+Actions_t prev_action = ACTION_DUMMY;
+
+// up to 255
+#define DRIVE_SPEED 150
+#define TURN_SPEED 210
+
+
+bool line_following_enabled = false;
+#define LINE_FOLLOWING_FACTOR 0.1f
+#define LEAKY_INTEGRATION_FACTOR 0.01f
+float line_following_wheel_balance = 1.0;
+
+
+void setDriveSpeed(void) {
+  analogWrite(DRIVING_pin_ENA, DRIVE_SPEED);
+  analogWrite(DRIVING_pin_ENB, DRIVE_SPEED);
+  return;
+}
+
+void setTurnSpeed(void) {
+  analogWrite(DRIVING_pin_ENA, TURN_SPEED);
+  analogWrite(DRIVING_pin_ENB, TURN_SPEED);
+  return;
+}
+
+void setup_driving(void) {
+  pinMode(DRIVING_pin_ENA, OUTPUT);
+  pinMode(DRIVING_pin_IN1, OUTPUT);
+  pinMode(DRIVING_pin_IN2, OUTPUT);
+  pinMode(DRIVING_pin_IN3, OUTPUT);
+  pinMode(DRIVING_pin_IN4, OUTPUT);
+  pinMode(DRIVING_pin_ENB, OUTPUT);
+
+  // required redundancy in enable pins ( eye roll )
+  pinMode(12, OUTPUT);
+  pinMode(13, OUTPUT);
+  digitalWrite(12, HIGH);
+  digitalWrite(13, HIGH);
+
+  // analogWrite(DRIVING_pin_ENA, TURN_SPEED);
+  // analogWrite(DRIVING_pin_ENB, TURN_SPEED);
+  setTurnSpeed();
+  return;
+}
+
+
+
+// LINE SENSING setup
+// ———————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+#define LINE_SENS_FL_pin A4
+#define LINE_SENS_FM_pin A3
+#define LINE_SENS_FR_pin A5
+#define LINE_SENS_L_pin  A0
+#define LINE_SENS_M_pin  A2
+#define LINE_SENS_R_pin  A1
+
+#define LINE_SENSE_THRESHOLD 100
+
+typedef enum {
+  LINE_SENS_FL,
+  LINE_SENS_FM,
+  LINE_SENS_FR,
+  LINE_SENS_L,
+  LINE_SENS_M,
+  LINE_SENS_R,
+} LineSensor_t;
+
+// convention: 
+// - 0 is white
+// - 1 is black
+bool prev_line_sensors[6] = {0, 0, 0, 0, 0, 0};
+bool curr_line_sensors[6] = {0, 0, 0, 0, 0, 0};
+
+
+// PROTOTYPES:
+bool TestForLine_W_to_B(LineSensor_t which_sensor);
+bool TestForLine_B_to_W(LineSensor_t which_sensor);
+
+void setup_line_sensing(void) {
+  return;
+}
+
+
+// IR BEACON setup
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+#define READ_IN_FROM_IR_BEACON 10
+// TOTAL PINS 7
+
+void setup_IR_beacon(void) {
+  pinMode(READ_IN_FROM_IR_BEACON, INPUT);
+  return;
+}
+
+
+// STEPPER DRUM setup
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+#define ENABLE_OUT_TO_DRUM_FOLLOWER_pin 4
+#define UPDATE_OUT_TO_DRUM_FOLLOWER_pin 2
+// TOTAL PINS 9
+
+// bool drum_enabled;
+
+// FOR REFERENCE, THESE ARE SET ON THE STEPPER FOLLOWER BOARD
+// stepper positions:
+#define DRUM_POS_0    0
+#define DRUM_POS_1    120
+#define DRUM_POS_2    240
+#define DRUM_POS_3    360
+
+void setup_stepper_drum(void) {
+  pinMode(ENABLE_OUT_TO_DRUM_FOLLOWER_pin, OUTPUT);
+  pinMode(UPDATE_OUT_TO_DRUM_FOLLOWER_pin, OUTPUT);
+
+  digitalWrite(ENABLE_OUT_TO_DRUM_FOLLOWER_pin, LOW);
+  digitalWrite(UPDATE_OUT_TO_DRUM_FOLLOWER_pin, LOW);
+  return;
+}
+
+// FLYWHEEL setup
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+//#define FLY_RPWM_pin 10 // CAN WIRE TO GROUND
+#define FLY_LPWM_pin 11 // PWM
+//#define FLY_R_EN_pin 12
+//#define FLY_L_EN_pin 13
+//#define FLY_R_IS_pin 9 // WE IGNORE THE ALARM
+//#define FLY_L_IS_pin 8 // WE IGNORE THE ALARM
+// TOTAL PINS 12 ... just enough without touching Serial
+
+//#define FLY_MOTOR_REF_PWM 50
+int FLY_MOTOR_REF_PWM = 50;
+
+int strategy[8] = {65, 75, 85,  // first mag
+                   65, 75, 85,  // reload 1
+                   70, 85};      // reload 2
+int strat_i = 0;
+
+void next_puck() {
+  FLY_MOTOR_REF_PWM = strategy[strat_i%8];
+  strat_i++;
+   Serial.print("Flywheel power: "); 
+   Serial.println(FLY_MOTOR_REF_PWM);
+}
+
+bool flywheels_on = false;
+bool prev_flywheels_on = false;
+
+// implement interrupt for current alarms
+
+void setup_flywheel(void) {
+  pinMode(FLY_LPWM_pin, OUTPUT);
+  //pinMode(FLY_R_EN_pin, OUTPUT);
+  //pinMode(FLY_L_EN_pin, OUTPUT);
+
+  digitalWrite(FLY_LPWM_pin, 0);
+
+  turnFlywheelsOff();
+  return;
+}
+
+
+// DISTANCE SENSOR setup
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+#define pin_trig_1 A1
+#define pin_trig_2 A2
+#define pin_echo_1 A0
+#define pin_echo_2 A3
+
+float total_distance = 87.0;
+
+float timing = 0.0;
+float distance_1 = 0.0;
+float distance_2 = 0.0;
+float distance_sum = 0;
+float prev_distance_sum = 0;
+float prev_2_distance_sum = 0;
+
+
+void setup_distance() {
+  pinMode(pin_trig_1, OUTPUT);
+  pinMode(pin_trig_2, OUTPUT);
+  pinMode(pin_echo_1, INPUT);
+  pinMode(pin_echo_2, INPUT);
+  digitalWrite(pin_trig_1, LOW);
+  digitalWrite(pin_trig_2, LOW);
+}
+
+
+
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+void setup() {
+  // put your setup code here, to run once:
+  Serial.begin(115200);
+  delay(300);
+
+  setup_state_machine();
+  setup_driving();
+  setup_IR_beacon();
+  setup_stepper_drum();
+  setup_flywheel();
+  setup_distance();
+
+
+
+  // Aaaaaaaaaand... go
+  Serial.println("Aaaaaannnnddd... GO!");
+  state = STATE_A1_ORIENTING;
+  action = ACTION_TURN_RIGHT;
+  //handleTurnRight();
+
+  // START GAME CLOCK HERE
+  // setup_timer();
+
+
+  // set up manual state:
+  //setState(TEST_DISTANCE_SENSORS);
+}
+
+
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+// LOOP FUNCTIONS
+// ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+
+void loop() {
+  //unGlobalUpdates();
+  // checkGlobalEvents();
+  
+  checkLocalEvents();
+  handleDrivingActions();
+  // Serial.println(action);
+}
+
+void runGlobalUpdates(void) {
+  updateLineSensors();
+}
+
+// void checkGlobalEvents(void) {
+//     //  this one is handled by the timer interrupt
+//   if (TestForGameClockTimerExpired()) state = STATE_DONE;
+//   return;
+// }
+
+void shortcut_sequence() {
+  Serial.println("starting short cut sequence");
+  handleMoveForward();
+  Serial.println("moving forward");
+  delay(2000);
+  handleActionOff();
+  delay(500);
+  handleTurnLeft();
+
+  while(!testIfOrientedWithDistance());
+  // delay(120);
+  handleActionOff();
+  delay(500);
+  handleTurnRight();
+  delay(100);
+  handleActionOff();
+  delay(500);
+  Serial.println("In this town there lived an outlaw...");
+}
+
+void checkLocalEvents(void) {
+  switch (state) {
+    case STATE_A1_ORIENTING:
+      if(testIfOrientedWithDistance()/*TestForLeftIRHighest()*/) {
+        // action = ACTION_MOVE_FORWARD;
+        // setDriveSpeed();
+        // setState(STATE_B1_SEARCHING_FOR_LINE);
+       
+        turnFlywheelsOn(); // THIS IS WHERE WE TURN ON THE FLYWHEELS!!!!!
+        shortcut_sequence();
+        next_puck();
+        restart_reload_timer();
+        enableDrum();
+        setState(STATE_C1_FIRING_FIRST);
+        
+      }
+      break;
+
+    // case STATE_A1_ORIENTING:
+    //   if(TestForLeftIRHighest()) {
+    //     action = ACTION_MOVE_FORWARD;
+    //     setDriveSpeed();
+    //     setState(STATE_B1_SEARCHING_FOR_LINE);
+    //   }
+    //   break;
+
+    // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+    // case STATE_B1_SEARCHING_FOR_LINE:
+
+    //   if (TestForLine_W_to_B(LINE_SENS_FL)) {
+    //     // possible issue: both FL and FR go high at the same time and are missed by the state machine
+    //     /* fix: */ curr_line_sensors[LINE_SENS_FR] = 0;
+
+    //     action = ACTION_TURN_LEFT;
+    //     setTurnSpeed();
+    //     setState(STATE_B2a_ROTATE_LEFT);
+    //   } 
+      
+    //   else if (TestForLine_W_to_B(LINE_SENS_FR)) {
+    //     // possible issue: both FL and FR go high at the same time and are missed by the state machine
+    //     /* fix: */ curr_line_sensors[LINE_SENS_FL] = 0;
+
+    //     action = ACTION_TURN_RIGHT;
+    //     setTurnSpeed();
+    //     setState(STATE_B2b_ROTATE_RIGHT);
+    //   }
+    //   break;
+
+    // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+    // case STATE_B2a_ROTATE_LEFT:
+
+    //   if (TestForLine_W_to_B(LINE_SENS_FR)) {
+    //     action = ACTION_MOVE_FORWARD;
+    //     setDriveSpeed();
+    //     setState(STATE_B3_FORWARD_ONTO_LINE);
+    //   } 
+      
+    //   // else if (TestForLine_B_to_W(LINE_SENS_FL)) {
+    //   //   // possible issue: both FL goes low and FR go high at the same time and are missed by the state machine
+    //   //   /* fix: */ curr_line_sensors[LINE_SENS_FR] = 0;
+
+    //   //   action = ACTION_MOVE_FORWARD;
+    //   //   setDriveSpeed();
+    //   //   setState(STATE_B1_SEARCHING_FOR_LINE);
+    //   // }
+    //   break;
+
+    // // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+    // case STATE_B2b_ROTATE_RIGHT:
+      
+    //   if (TestForLine_W_to_B(LINE_SENS_FL)) {
+    //     action = ACTION_MOVE_FORWARD;
+    //     setDriveSpeed();
+    //     setState(STATE_B3_FORWARD_ONTO_LINE);
+    //   }
+
+    //   // else if (TestForLine_B_to_W(LINE_SENS_FR)) {
+    //   //   // possible issue: both FL goes low and FR go high at the same time and are missed by the state machine
+    //   //   /* fix: */ curr_line_sensors[LINE_SENS_FL] = 0;
+
+    //   //   action = ACTION_MOVE_FORWARD;
+    //   //   setDriveSpeed();
+    //   //   setState(STATE_B1_SEARCHING_FOR_LINE);
+    //   // }
+    //   break;
+
+    // // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+    // case STATE_B3_FORWARD_ONTO_LINE:
+    //   if (TestForLine_W_to_B(LINE_SENS_M)) {
+    //     action = ACTION_TURN_LEFT;
+    //     setTurnSpeed();
+    //     setState(STATE_B4_ALIGNING);
+    //   }
+    //   break;
+
+    // // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+    // case STATE_B4_ALIGNING:
+    //   if (TestForLine_W_to_B(LINE_SENS_M)) {
+    //     //enable_line_following(true);
+    //     action = ACTION_MOVE_FORWARD;
+    //     setDriveSpeed();
+    //     enable_line_following(true);
+    //     setState(STATE_B5_LINE_FOLLOWING);
+    //   }
+    //   break;
+
+    // // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+    // case STATE_B5_LINE_FOLLOWING:
+    //   if (/*TestForLine_W_to_B(LINE_SENS_FL) ||*/
+    //       TestForLine_W_to_B(LINE_SENS_FR)) {
+
+    //     enableDrum(); // drum_enabled = true;
+    //     turnFlywheelsOn(); // THIS IS WHERE WE TURN ON THE FLYWHEELS!!!!!
+    //     start_reload_timer();
+    //     enable_line_following(false);
+    //     action = ACTION_OFF;
+    //     setState(STATE_C1_FIRING_FIRST);
+    //   }
+    //   break;
+
+    // case STATE_A1_ORIENTING:
+    //   if(TestForLeftIRHighest()) {
+    //     action = ACTION_MOVE_FORWARD;
+    //     setDriveSpeed();
+    //     //turnFlywheelsOn(); // THIS IS WHERE WE TURN ON THE FLYWHEELS!!!!!
+    //     //     start_reload_timer();
+    //     //     enable_line_following(false);
+    //         action = ACTION_OFF;
+    //     restart_reload_timer();
+    //     action = ACTION_MOVE_FORWARD;
+    //     setState(STATE_C1_FIRING_FIRST);
+    //   }
+    // //   break;
+
+    // case STATE_B0_move_forward:
+    //   // if (TestForReloadTimerExpired()) {
+    //   //   turnFlywheelsOn(); // THIS IS WHERE WE TURN ON THE FLYWHEELS!!!!!
+    //   //   restart_reload_timer();
+    //   //   action = ACTION_OFF;
+    //   //   setState(STATE_C1_FIRING_FIRST);
+    //   // }
+    //   break;
+
+    // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+    case STATE_C1_FIRING_FIRST:
+      if (TestForReloadTimerExpired()==1) {
+        //moveDrumToPos(DRUM_POS_1);
+        nextDrumPos();
+        restart_reload_timer();
+        next_puck();
+        setState(STATE_C2_FIRING_SECOND);
+      }
+      break;
+
+    // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+    case STATE_C2_FIRING_SECOND:
+      if (TestForReloadTimerExpired()==1) {
+        //moveDrumToPos(DRUM_POS_2);
+        // Serial.println("about to run: restart_reload_timer();");
+        restart_reload_timer();
+        
+        // Serial.println("about to run: handleTurnRight();");
+        // handleTurnRight();
+        // Serial.println("about to run: delay(160);");
+        // delay(100);
+        // Serial.println("about to run: handleActionOff();");
+        handleActionOff();
+        // // Serial.println("about to run: nextDrumPos();");
+        // delay(1500);
+        nextDrumPos();
+        next_puck();
+        Serial.println("about to run: setState(STATE_C3_FIRING_THIRD);");
+        setState(STATE_C3_FIRING_THIRD);
+      }
+      break;
+
+    // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+    case STATE_C3_FIRING_THIRD:
+      if (TestForReloadTimerExpired()==1) {
+        //moveDrumToPos(DRUM_POS_3);
+        // handleMoveForward();
+        // while(!testIfOrientedWithDistance());
+        // handleActionOff();
+        //delay(200);
+        // handleTurnRight();
+        // delay(130);
+        //handleActionOff();
+        delay(1000);
+        nextDrumPos();
+        next_puck();
+        setState(STATE_D1_RETURN_FOR_RELOAD);
+      }
+      break;
+
+    case STATE_D1_RETURN_FOR_RELOAD:
+        delay(5000);
+        //while(!testIfOrientedWithDistance());
+        // delay(1200);
+        handleMoveBackward();
+        delay(2700);
+        handleActionOff();
+        setState(STATE_D2_HOLD_FOR_RELOAD);
+      break;
+
+    case STATE_D2_HOLD_FOR_RELOAD:
+      delay(12000);
+      // handleTurnLeft();
+      // delay(300);
+      handleMoveForward();
+      Serial.println("moving forward");
+      delay(2000);
+      handleActionOff();
+      delay(120);
+      handleTurnLeft();
+      while(!testIfOrientedWithDistance());
+      // delay(120);
+      handleActionOff();
+      delay(200);
+      restart_reload_timer();
+      // handleTurnRight();
+      // delay(100);
+      // handleActionOff();
+      // delay(500);
+      Serial.println("He was vicious and a killer though a youth of 24...");
+      setState(STATE_C1_FIRING_FIRST);
+      break;
+
+    // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+    case STATE_DONE:
+      turnOffAllSystems();
+      // BLOCK
+      while(1);
+      break;
+
+
+    // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+    case TEST_DISTANCE_SENSORS:
+        if(testIfOrientedWithDistance()) {
+          Serial.println("ALIGNWED");
+          while(1);
+        }
+      break;
+
+    default:
+      return;
+  }
+}
+
+
+
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+// MODULE FUNCTION
+// ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+
+// STATE MACHINE functions
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+void setState(States_t newState) {
+  if (state != newState || state==STATE_A1_ORIENTING) {
+    Serial.print("STATE: ");
+    Serial.println(newState);
+    state = newState;
+  }
+  return;
+}
+
+void turnOffAllSystems(void) {
+  //disableDrum();
+  return;
+}
+
+// TIMER functions
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+/*
+void GameClock_Timer_Handler() {
+  setState(STATE_DONE);
+  return;
+}*/
+// shouldn't need this one because the handler turns off all systems
+// bool TestForGameClockTimerExpired(void) {
+//   return false;
+// }
+// void start_gameclock_timer(void) {
+//   return;
+// }
+
+
+void start_reload_timer(void) {
+  restart_reload_timer(); // makes this a redundant function, but wrapping so I could separate later
+  return;
+}
+
+void restart_reload_timer(void) {
+  reload_timer.reset();
+  return;
+}
+
+int TestForReloadTimerExpired(void) {
+  return (int) reload_timer.check();
+}
+
+
+// DRIVING functions
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+void handleDrivingActions(void) {
+  if (prev_action != action) {
+    prev_action = action;
+    switch(action) {
+      case ACTION_MOVE_FORWARD:
+        handleMoveForward();
+        break;
+
+      case ACTION_MOVE_BACKWARD:
+        handleMoveBackward();
+        break;
+
+      case ACTION_TURN_LEFT:
+        handleTurnLeft();
+        break;
+      
+      case ACTION_TURN_RIGHT:
+        handleTurnRight();
+        break;
+      
+      case ACTION_OFF:
+        handleActionOff();
+        break;
+    }
+  }
+  // if (line_following_enabled) {
+  //   do_line_following();
+  // }
+  return;
+}
+
+void do_line_following(void) {
+  // positive line_following_wheel_balance favors left wheel
+  if (curr_line_sensors[LINE_SENS_L]) {
+    line_following_wheel_balance -= LINE_FOLLOWING_FACTOR;
+  }
+  if (curr_line_sensors[LINE_SENS_R]) {
+    line_following_wheel_balance += LINE_FOLLOWING_FACTOR;
+  }
+  // avoid dividing by zero
+  line_following_wheel_balance = constrain(line_following_wheel_balance, 0.3, 3.0);
+
+  if (line_following_wheel_balance == 1.0) {
+    analogWrite(DRIVING_pin_ENA, DRIVE_SPEED);
+    analogWrite(DRIVING_pin_ENB, DRIVE_SPEED);
+  }
+  else if (line_following_wheel_balance > 1.0) {
+    analogWrite(DRIVING_pin_ENA, DRIVE_SPEED);
+    analogWrite(DRIVING_pin_ENB, (int)(DRIVE_SPEED / line_following_wheel_balance));
+  }
+  else if (line_following_wheel_balance < 1.0) {
+    analogWrite(DRIVING_pin_ENA, (int)(DRIVE_SPEED / line_following_wheel_balance));
+    analogWrite(DRIVING_pin_ENB, DRIVE_SPEED);
+  }
+  // decaying offset
+  line_following_wheel_balance += /*not sure + or - */ (line_following_wheel_balance-1) * (1 - LEAKY_INTEGRATION_FACTOR); 
+}
+
+void enable_line_following(bool enable) {
+  line_following_enabled = enable;
+  return;
+}
+
+/*
+//different line following
+#define lf_responsivity 1.0 //change as needed for responsivity
+void simple_line_follow() {
+  //assuming case of hogline detected handled elsewhere
+  if(curr_line_sensors[LINE_SENS_C]) {
+  //straight
+    analogWrite(DRIVING_pin_ENA, DRIVE_SPEED);
+    analogWrite(DRIVING_pin_ENB, DRIVE_SPEED);
+  }
+  else if(curr_line_sensors[LINE_SENS_L] && !curr_line_sensors[LINE_SENS_R]) {
+  //turn left
+    analogWrite(DRIVING_pin_ENA, DRIVE_SPEED);
+    analogWrite(DRIVING_pin_ENB, DRIVE_SPEED/(2*lf_responsivity);
+  }
+  else if (curr_line_sensors[LINE_SENS_R] && !curr_line_sensors[LINE_SENS_L]) {
+  //turn right
+    analogWrite(DRIVING_pin_ENA, DRIVE_SPEED/(2*lf_responsivity);
+    analogWrite(DRIVING_pin_ENB, DRIVE_SPEED);
+  }
+  else if (curr_line_sensors[LINE_SENS_L] && curr_line_sensors[LINE_SENS_R]) {
+  //keep straight
+    analogWrite(DRIVING_pin_ENA, DRIVE_SPEED);
+    analogWrite(DRIVING_pin_ENB, DRIVE_SPEED);
+  }
+  else {
+  //if none of the above are happening, try slowing down to give linefollowing more time to react
+  Serial.println("damn, lost line");
+  }
+}
+*/
+//or
+/*
+//PID line follower
+float Kp = 25;
+float Ki = 0.00;
+float Kd = 15;
+int error = 0;
+int lastError = 0;
+int integral = 0;
+int derivative = 0;
+int powerDifference = 0;
+int maxSpeed = 200
+int baseSpeed = DRIVE_SPEED
+void PID_LF() {
+  //assuming hogline handled elsewhere
+  if ()
+}
+
+)
+*/
+
+// ACTUAL DIRECTIONS OF ROBOT
+void handleMoveForward(void) {
+  Serial.println("handleMoveForward() called");
+  setLeftForward();
+  setRightForward();
+  return;
+}
+
+void handleMoveBackward(void) {
+  Serial.println("handleMoveBackward() called");
+  setLeftReverse();
+  setRightReverse();
+  return;
+}
+
+void handleTurnLeft(void) {
+  Serial.println("handleTurnLeft() called");
+  setRightForward();
+  setLeftReverse();
+  return;
+}
+
+void handleTurnRight(void) {
+  Serial.println("handleTurnRight() called");
+  setLeftForward();
+  setRightReverse();
+  return;
+}
+
+void handleActionOff(void) {
+  Serial.println("handleActionOff() called");
+  setLeftOff();
+  setRightOff();
+  return;
+}
+
+// FORWARD, REVERSE, STOP FOR EACH SIDE L/R
+void setLeftForward(void) {
+  digitalWrite(DRIVING_pin_IN1, HIGH);
+  digitalWrite(DRIVING_pin_IN2, LOW);
+  return;
+}
+void setLeftReverse(void) {
+  digitalWrite(DRIVING_pin_IN1, LOW);
+  digitalWrite(DRIVING_pin_IN2, HIGH);
+  return;
+}
+void setLeftOff(void) {
+  digitalWrite(DRIVING_pin_IN1, LOW);
+  digitalWrite(DRIVING_pin_IN2, LOW);
+  return;
+}
+void setLeftActiveBrake(void) {
+  digitalWrite(DRIVING_pin_IN1, HIGH);
+  digitalWrite(DRIVING_pin_IN2, HIGH);
+  return;
+}
+void setRightForward(void) {
+  digitalWrite(DRIVING_pin_IN3, HIGH);
+  digitalWrite(DRIVING_pin_IN4, LOW);
+  return;
+}
+void setRightReverse(void) {
+  digitalWrite(DRIVING_pin_IN3, LOW);
+  digitalWrite(DRIVING_pin_IN4, HIGH);
+  return;
+}
+void setRightOff(void) {
+  digitalWrite(DRIVING_pin_IN3, LOW);
+  digitalWrite(DRIVING_pin_IN4, LOW);
+  return;
+}
+void setRightActiveBrake(void) {
+  digitalWrite(DRIVING_pin_IN3, HIGH);
+  digitalWrite(DRIVING_pin_IN4, HIGH);
+  return;
+}
+
+
+// LINE SENSING functions
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+void updateLineSensors(void) {
+  for (int i = 0; i < 6; i++) {
+    prev_line_sensors[i] = curr_line_sensors[i];
+  }
+  curr_line_sensors[LINE_SENS_FL] = (analogRead(LINE_SENS_FL_pin)> LINE_SENSE_THRESHOLD);
+  curr_line_sensors[LINE_SENS_FM] = (analogRead(LINE_SENS_FM_pin)> LINE_SENSE_THRESHOLD);
+  curr_line_sensors[LINE_SENS_FR] = (analogRead(LINE_SENS_FR_pin)> LINE_SENSE_THRESHOLD);
+  curr_line_sensors[LINE_SENS_L]  = (analogRead(LINE_SENS_L_pin)> LINE_SENSE_THRESHOLD);
+  curr_line_sensors[LINE_SENS_M]  = (analogRead(LINE_SENS_M_pin)> LINE_SENSE_THRESHOLD);
+  curr_line_sensors[LINE_SENS_R]  = (analogRead(LINE_SENS_R_pin)> LINE_SENSE_THRESHOLD);
+  //Serial.println(f"FL: curr_line_sensors");
+  
+  // Serial.print("FL: ");
+  // Serial.print(analogRead(LINE_SENS_FL_pin));
+  // Serial.print(", FM: ");
+  // Serial.print(analogRead(LINE_SENS_FM_pin));
+  // Serial.print(", FR: ");
+  // Serial.print(analogRead(LINE_SENS_FR_pin));
+  // Serial.print(", L: ");
+  // Serial.print(analogRead(LINE_SENS_L_pin));
+  // Serial.print(", M: ");
+  // Serial.print(analogRead(LINE_SENS_M_pin));
+  // Serial.print(", R: ");
+  // Serial.println(analogRead(LINE_SENS_R_pin));
+  return;
+}
+
+
+bool TestForLine_W_to_B(LineSensor_t which_sensor) {
+  if (prev_line_sensors[which_sensor] == 0 &&
+      curr_line_sensors[which_sensor] == 1) {
+    return true;
+  }
+  return false;
+}
+
+bool TestForLine_B_to_W(LineSensor_t which_sensor) {
+  if (prev_line_sensors[which_sensor] == 1 &&
+      curr_line_sensors[which_sensor] == 0) {
+    return true;
+  }
+  return false;
+}
+
+
+
+// IR BEACON functions
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+
+// returns true once the robot is oriented with the IR beacon on the left
+bool TestForLeftIRHighest(void) {
+  return digitalRead(READ_IN_FROM_IR_BEACON);
+}
+
+
+// STEPPER DRUM functions
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+void nextDrumPos(void) {
+  Serial.println("nextDrumPos");
+  digitalWrite(UPDATE_OUT_TO_DRUM_FOLLOWER_pin, HIGH);
+  delay(10);
+  digitalWrite(UPDATE_OUT_TO_DRUM_FOLLOWER_pin, LOW);
+  return;
+}
+
+void enableDrum() {
+  digitalWrite(ENABLE_OUT_TO_DRUM_FOLLOWER_pin, HIGH);
+}
+
+void disableDrum() {
+  digitalWrite(ENABLE_OUT_TO_DRUM_FOLLOWER_pin, LOW);
+}
+
+
+// FLYWHEEL functions
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+void turnFlywheelsOn(void) {
+  Serial.println("Turn flywheels on");
+  //digitalWrite(FLY_R_EN_pin, HIGH);
+  //digitalWrite(FLY_L_EN_pin, HIGH);
+  analogWrite(FLY_LPWM_pin, FLY_MOTOR_REF_PWM);
+  return;
+}
+
+void turnFlywheelsOff(void) {
+  Serial.println("Turn flywheels off");
+  //digitalWrite(FLY_R_EN_pin, LOW);
+  //digitalWrite(FLY_L_EN_pin, LOW);
+  digitalWrite(FLY_LPWM_pin, 0);
+  return;
+}
+
+
+// DISTANCE functions
+// ————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+bool testIfOrientedWithDistance() {
+  // read and compute first distance
+  digitalWrite(pin_trig_1, LOW);
+  delay(2);
+  digitalWrite(pin_trig_1, HIGH);
+  delay(10);
+  digitalWrite(pin_trig_1, LOW);
+
+  timing = pulseIn(pin_echo_1, HIGH);
+  distance_1 = (timing * 0.034) / 2;
+
+  // read and compute second distance
+  digitalWrite(pin_trig_2, LOW);
+  delay(2);
+  digitalWrite(pin_trig_2, HIGH);
+  delay(10);
+  digitalWrite(pin_trig_2, LOW);
+
+  timing = pulseIn(pin_echo_2, HIGH);
+  distance_2 = (timing * 0.034) / 2;
+
+  // two cycle memory
+  prev_2_distance_sum = prev_distance_sum;
+  prev_distance_sum = distance_sum;
+  distance_sum = distance_1 + distance_2;
+
+  // facing forward vs back
+  bool condition_1 = distance_1 > distance_2;
+
+  // within 10cm of target total distance
+  bool condition_2 = (distance_sum > total_distance-2) && (distance_sum < total_distance+2);
+
+  Serial.print("D1: ");
+  Serial.print(distance_1);
+  Serial.print(", D2: ");
+  Serial.print(distance_2);
+  Serial.print(", total: ");
+  Serial.println(distance_sum);
+
+  // test if above conditions are met and at low minimum
+  if (condition_1 && condition_2 &&
+    prev_2_distance_sum > prev_distance_sum &&
+    prev_distance_sum < distance_sum) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
+
+// float robot_length = 12.0;
+// float arena_width = 49.0;
+// float length_to_target_from_launch_pos = 70.0;
+
+// bool setTargetAngle() {
+//   // read and compute first distance
+//   digitalWrite(pin_trig_1, LOW);
+//   delay(2);
+//   digitalWrite(pin_trig_1, HIGH);
+//   delay(10);
+//   digitalWrite(pin_trig_1, LOW);
+
+//   timing = pulseIn(pin_echo_1, HIGH);
+//   distance_1 = (timing * 0.034) / 2;
+
+//   // read and compute second distance
+//   digitalWrite(pin_trig_2, LOW);
+//   delay(2);
+//   digitalWrite(pin_trig_2, HIGH);
+//   delay(10);
+//   digitalWrite(pin_trig_2, LOW);
+
+//   timing = pulseIn(pin_echo_2, HIGH);
+//   distance_2 = (timing * 0.034) / 2;
+
+//   distance_sum = distance_1 + distance_2;
+
+  
+//   float a_cur = math.acos(total_distance / distance_sum);
+  
+//   float distance_ratio = distance_1 / distance_2;
+//   float x_pos = (arena_width - robot_length) / (1.0 + distance_ratio) - (arena_width - robot_length) / 2.0;
+//   float a_target = math.atan(x_pos / length_to_target_from_launch_pos);
+
+//   float error = a_target-a_cur;
+
+
+//   Serial.print("distance_sum: ");
+//   Serial.print(distance_sum);
+//   Serial.print("distance_ratio: ");
+//   Serial.print(distance_ratio);
+//   Serial.print("x_pos: ");
+//   Serial.print(x_pos);
+//   Serial.print("a_cur: ");
+//   Serial.print(a_cur);
+//   Serial.print("a_target: ");
+//   Serial.print(a_target);
+//   Serial.print("error: ");
+//   Serial.println(error);
+  
+//   if (abs(a_target-a_cur) > 1.0) {
+//     if(a_cur < a_target) {
+//       handleTurnLeft();
+//     }
+//     if(a_cur > a_target) {
+//       handleTurnRight();
+//     }
+//     return false;
+//   } else {
+//     handleActionStop();
+//     return true;
+//   }
+// }
